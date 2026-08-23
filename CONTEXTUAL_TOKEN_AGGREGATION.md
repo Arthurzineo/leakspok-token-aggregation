@@ -35,6 +35,42 @@ These constraints are important because unrestricted token concatenation could
 create false positives, join unrelated data, or cause excessive CPU and memory
 use on adversarial input.
 
+## Bounded candidate examples
+
+A candidate has two representations: canonical bytes sent to the existing
+matcher and a byte span pointing to the complete value in the original input.
+Only adjacent fragments connected by an allowlisted horizontal separator may be
+combined.
+
+| Original fragments | Canonical candidate | Entity | Result |
+|---|---|---|---|
+| `+55` `54` `99912` `0654` | `+5554999120654` | PHONE | accepted if the phone matcher validates it |
+| `5` `5` `5` `4` `9` `9` `9` `1` `2` `0` `6` `5` `4` | `5554999120654` | PHONE | accepted; 13 digit tokens remain within the 16-token limit |
+| `529` `982` `247` `25` | `52998224725` | CPF | accepted only when the CPF checksum is valid |
+| `test` `@` `example` `.` `com` | `test@example.com` | EMAIL | accepted; exactly the 5-token email limit |
+
+For example, with `call +55 54 99912 0654 now`, the phone matcher receives
+`+5554999120654`, but the action keeps the original span for
+`+55 54 99912 0654`. Redaction therefore produces `call <PHONE> now` without
+changing offsets based on the shorter canonical representation.
+
+Examples that stop or are rejected:
+
+- `+55 54\n99912 0654`: newline is not an allowed gap, so the complete value is
+  not aggregated across the line boundary.
+- `55 code 54 code 99912`: words between numeric fragments stop the numeric
+  scanner.
+- Numeric input beyond 15 digits, 16 tokens, or 64 bytes: the scanner never
+  extends a candidate beyond the applicable bound.
+- `test @ unrelated words example . com`: the email grammar does not skip words
+  to manufacture an address.
+- Longer email-like input: the scanner never extends a candidate beyond 5
+  tokens or 254 bytes.
+
+The limits control worst-case work per starting token. They do not make a
+candidate a finding by themselves; the corresponding existing matcher must
+still validate the canonical value.
+
 ## Usage
 
 ```go
