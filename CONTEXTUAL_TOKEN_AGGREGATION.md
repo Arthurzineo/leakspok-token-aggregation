@@ -47,6 +47,64 @@ byteAnalyzer, err := analyzer.MakeByteAnalyzer(ctx, logger, options)
 
 With the option omitted or set to `false`, the legacy path remains active.
 
+## Technical architecture changes
+
+### Previous flow
+
+The byte analyzer iterated over the tokenizer output and sent each token to the
+configured `RuleRunner`. A matcher could therefore inspect only the bytes of one
+token at a time. Anonymization actions referred directly to that token's
+original offsets.
+
+```text
+input -> tokenizer -> individual token -> RuleRunner -> anonymization action
+```
+
+### Contextual flow
+
+When contextual detection is enabled, the analyzer first materializes the
+tokenizer output, then builds bounded candidates from adjacent compatible
+tokens. Each canonical candidate is evaluated by the same `RuleRunner` used by
+the original path. A successful match produces an action whose span covers the
+corresponding bytes in the original input. Finally, legacy and contextual
+actions are merged and overlaps are resolved before output is written.
+
+```text
+                         +-> individual token -> RuleRunner --+
+input -> tokenizer -----+                                  +-> resolve spans -> output
+                         +-> bounded candidate -> RuleRunner -+
+```
+
+The concurrent implementation does not introduce an unbounded goroutine per
+candidate. It submits contextual work to the analyzer's existing fixed-size
+token worker pool. The disabled branch continues directly through the legacy
+implementation, avoiding contextual candidate allocation.
+
+### New files
+
+- `analyzer/contextual_detection.go`: candidate construction for numeric and
+  email entities, canonicalization, bounded scanning, contextual rule
+  execution, cancellation handling, exception suppression, and deterministic
+  overlap resolution.
+- `analyzer/contextual_detection_test.go`: table-driven functional tests,
+  serial/concurrent parity tests, boundary and overlap cases, default-off
+  compatibility checks, and performance benchmarks.
+- `CONTEXTUAL_TOKEN_AGGREGATION.md`: design rationale, operational guidance,
+  architecture, file inventory, limits, and verification instructions.
+
+### Modified original files
+
+- `analyzer/factory.go`: adds the public `ContextualDetectionOptions` field to
+  `RunnerOptions` and propagates it when byte and string analyzers are created.
+- `analyzer/byte_analyzer.go`: selects the contextual execution path only when
+  enabled and combines validated contextual actions with normal token actions.
+- `README.md`: documents the opt-in feature, supported entities, configuration,
+  and bounded behavior.
+
+No matcher implementation, rule format, anonymization strategy, exception
+model, or cache API was replaced. The change is additive and the public option
+defaults to `false`.
+
 ## Verification
 
 The test suite covers fragmented PHONE, CPF, and EMAIL values; a phone with
