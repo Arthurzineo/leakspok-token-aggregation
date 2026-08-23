@@ -90,8 +90,15 @@ type ConcurrencyOptions struct {
 // RunnerOptions configures the cache and concurrency behavior of ByteAnalyzer
 // and StringAnalyzer instances created via MakeByteAnalyzer / MakeStringAnalyzer.
 type RunnerOptions struct {
-	Cache       CacheOptions
-	Concurrency ConcurrencyOptions
+	Cache               CacheOptions
+	Concurrency         ConcurrencyOptions
+	ContextualDetection ContextualDetectionOptions
+}
+
+// ContextualDetectionOptions configures bounded detection of PII split across
+// adjacent tokens. It is disabled by default to preserve legacy behavior.
+type ContextualDetectionOptions struct {
+	Enabled bool
 }
 
 func buildCacheStore(ctx context.Context, options CacheOptions) (analyzercache.CacheStore, error) {
@@ -197,6 +204,7 @@ func MakeByteAnalyzer(ctx context.Context, logger *slog.Logger, options RunnerOp
 	}
 
 	ba := NewByteAnalyzer(logger, runner)
+	ba.contextualDetection = options.ContextualDetection.Enabled
 	if concurrency.Enabled && concurrency.ConcurrentTokenProcessing {
 		ba.pool = tokenPool
 	}
@@ -235,5 +243,7 @@ func MakeStringAnalyzer(ctx context.Context, logger *slog.Logger, options Runner
 		runner = NewSerialRulesRuner(logger, cache)
 	}
 
-	return NewStringAnalyzer(logger, runner), nil
+	sa := NewStringAnalyzer(logger, runner)
+	sa.byteAnalyzer.contextualDetection = options.ContextualDetection.Enabled
+	return sa, nil
 }

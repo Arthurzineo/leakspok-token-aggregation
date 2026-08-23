@@ -143,6 +143,21 @@ ba, err := analyzer.MakeByteAnalyzer(logger, opts)
 // Use ba.Anonymize(ctx, rules, &outputBuf, data)
 ```
 
+### Contextual multi-token detection
+
+PHONE, CPF and EMAIL values split by horizontal delimiters can be detected with
+the bounded contextual path. It is disabled by default:
+
+```go
+opts := analyzer.RunnerOptions{
+	ContextualDetection: analyzer.ContextualDetectionOptions{Enabled: true},
+}
+```
+
+The tokenizer and single-token fast path remain unchanged. Contextual candidates
+are validated by the configured rules and matchers, while anonymization uses the
+original input offsets.
+
 ### Custom Rules
 
 ```go
