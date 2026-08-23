@@ -105,6 +105,131 @@ func rulesForNumericDigits(rules []Rule, digits int) []Rule {
 	return contextualRules(rules, entities...)
 }
 
+func parseTwoDigits(value []byte) (int, bool) {
+	if len(value) != 2 || value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9' {
+		return 0, false
+	}
+	return int(value[0]-'0')*10 + int(value[1]-'0'), true
+}
+
+func parseFourDigits(value []byte) (int, bool) {
+	if len(value) != 4 {
+		return 0, false
+	}
+	result := 0
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+		result = result*10 + int(char-'0')
+	}
+	return result, true
+}
+
+func validCalendarDate(year, month, day int) bool {
+	if year < 1 || month < 1 || month > 12 || day < 1 {
+		return false
+	}
+	days := [...]int{0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	if month == 2 && (year%400 == 0 || year%4 == 0 && year%100 != 0) {
+		days[month]++
+	}
+	return day <= days[month]
+}
+
+func isDateSeparator(char byte) bool {
+	return char == '-' || char == '.' || char == '/'
+}
+
+func parseKnownDate(value []byte) bool {
+	if len(value) != 10 {
+		return false
+	}
+	if isDateSeparator(value[4]) && value[7] == value[4] {
+		year, yearOK := parseFourDigits(value[:4])
+		month, monthOK := parseTwoDigits(value[5:7])
+		day, dayOK := parseTwoDigits(value[8:])
+		return yearOK && monthOK && dayOK && validCalendarDate(year, month, day)
+	}
+	if !isDateSeparator(value[2]) || value[5] != value[2] {
+		return false
+	}
+	first, firstOK := parseTwoDigits(value[:2])
+	second, secondOK := parseTwoDigits(value[3:5])
+	year, yearOK := parseFourDigits(value[6:])
+	if !firstOK || !secondOK || !yearOK {
+		return false
+	}
+	return validCalendarDate(year, second, first) || validCalendarDate(year, first, second)
+}
+
+func parseKnownTime(value []byte) bool {
+	switch len(value) {
+	case 2:
+		hour, ok := parseTwoDigits(value)
+		return ok && hour < 24
+	case 4:
+		hour, hourOK := parseTwoDigits(value[:2])
+		minute, minuteOK := parseTwoDigits(value[2:])
+		return hourOK && minuteOK && hour < 24 && minute < 60
+	case 5:
+		hour, hourOK := parseTwoDigits(value[:2])
+		minute, minuteOK := parseTwoDigits(value[3:])
+		return value[2] == ':' && hourOK && minuteOK && hour < 24 && minute < 60
+	case 8:
+		hour, hourOK := parseTwoDigits(value[:2])
+		minute, minuteOK := parseTwoDigits(value[3:5])
+		second, secondOK := parseTwoDigits(value[6:])
+		return value[2] == ':' && value[5] == ':' && hourOK && minuteOK && secondOK &&
+			hour < 24 && minute < 60 && second < 60
+	default:
+		return false
+	}
+}
+
+func splitHorizontalFields(value []byte) ([]byte, []byte) {
+	for index := 0; index < len(value); {
+		char, size := utf8.DecodeRune(value[index:])
+		if unicode.IsSpace(char) && char != '\n' && char != '\r' && char != '\v' && char != '\f' {
+			end := index + size
+			for end < len(value) {
+				next, nextSize := utf8.DecodeRune(value[end:])
+				if !unicode.IsSpace(next) || next == '\n' || next == '\r' || next == '\v' || next == '\f' {
+					break
+				}
+				end += nextSize
+			}
+			return value[:index], value[end:]
+		}
+		index += size
+	}
+	return value, nil
+}
+
+func looksLikeKnownDateTime(value []byte) bool {
+	if len(value) < 10 || (!isDateSeparator(value[2]) && !isDateSeparator(value[4])) {
+		return false
+	}
+	date, timeValue := splitHorizontalFields(value)
+	if !parseKnownDate(date) {
+		return false
+	}
+	return len(timeValue) == 0 || parseKnownTime(timeValue)
+}
+
+func excludePhoneForKnownDate(rules []Rule, value []byte) []Rule {
+	if !looksLikeKnownDateTime(value) {
+		return rules
+	}
+	selected := make([]Rule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Matcher == nil || rule.Matcher.Entity() != pattern.EntityPhone {
+			selected = append(selected, rule)
+		}
+	}
+	return selected
+}
+
 func appendNumericToken(dst []byte, token []byte, first bool) ([]byte, int, bool) {
 	digits := 0
 	for i, char := range token {
@@ -178,6 +303,8 @@ func buildNumericCandidates(ctx context.Context, input []byte, tokens []Token, r
 			continue
 		}
 		selectedRules := rulesForNumericDigits(rules, digits)
+		original := input[tokens[start].Start:tokens[end].End]
+		selectedRules = excludePhoneForKnownDate(selectedRules, original)
 		if len(selectedRules) == 0 {
 			continue
 		}
@@ -322,7 +449,8 @@ func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules 
 		if ctx.Err() != nil {
 			return nil, false
 		}
-		if matched, found := t.ruleRunner.Process(ctx, rules, token.Content); found {
+		tokenRules := excludePhoneForKnownDate(rules, token.Content)
+		if matched, found := t.ruleRunner.Process(ctx, tokenRules, token.Content); found {
 			actions = append(actions, actionForMatch(token, matched))
 		}
 	}
@@ -369,7 +497,8 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 	}
 
 	for _, token := range tokens {
-		if !submit(token, token.Content, rules) {
+		tokenRules := excludePhoneForKnownDate(rules, token.Content)
+		if !submit(token, token.Content, tokenRules) {
 			complete = false
 			break
 		}

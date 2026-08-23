@@ -81,9 +81,25 @@ still validate the canonical value.
 Contextual PHONE detection deliberately reuses the legacy `PhoneMatcher`, whose
 regex accepts short phone-like digit sequences and is not anchored to a stricter
 regional numbering plan. With the feature enabled, unrelated horizontal numeric
-groups such as `Sala 101 202 303` or a date/time-like value such as
-`12-05-2024 15` may canonicalize to a value accepted as PHONE. This is a known
-false-positive trade-off and a reason the feature remains disabled by default.
+groups such as `Sala 101 202 303` may canonicalize to a value accepted as PHONE.
+This is a known false-positive trade-off and a reason the feature remains
+disabled by default.
+
+Dates receive a cheap structural exclusion before PHONE evaluation. Supported
+calendar layouts are Brazilian `DD-MM-YYYY`, United States `MM-DD-YYYY`, and ISO
+`YYYY-MM-DD`, with `-`, `.`, or `/` separators. Optional valid times include
+`HH`, `HHMM`, `HH:MM`, and `HH:MM:SS`. The check validates real month lengths
+and leap years, so `29-02-2024` is excluded from PHONE while `31-02-2024` is not.
+Ambiguous values such as `05-06-2024` are considered a date when either the BR
+or US interpretation is valid.
+
+The date check is a bounded byte parser, not a new regular expression or a
+general natural-language date parser. It examines at most the existing 64-byte
+numeric candidate and adds constant work before PHONE matching. Month names,
+two-digit years, time zones, and free-form dates are intentionally outside its
+scope. A real phone deliberately formatted exactly like a valid supported date
+will be excluded; this is the chosen trade-off to avoid common date
+false-positives.
 
 Credit-card candidates are treated differently: a complete 16-digit numeric
 chain is evaluated only by CREDIT_CARD rules and must pass a contextual Luhn
@@ -141,8 +157,8 @@ implementation, avoiding contextual candidate allocation.
 
 - `analyzer/contextual_detection.go`: candidate construction for numeric and
   email entities, canonicalization, bounded scanning, contextual rule
-  execution, cancellation handling, full-chain overflow rejection, and
-  deterministic overlap resolution.
+  execution, calendar/date exclusion, cancellation handling, full-chain
+  overflow rejection, and deterministic overlap resolution.
 - `analyzer/contextual_detection_test.go`: table-driven functional tests,
   serial/concurrent parity tests, boundary and overlap cases, default-off
   compatibility checks, and performance benchmarks.
@@ -170,7 +186,7 @@ output. The change is additive and the public option defaults to `false`.
 The test suite covers fragmented PHONE, CPF, CREDIT_CARD, and EMAIL values; a phone with
 every digit separated, with and without `+`; invalid boundaries; exceptions;
 Luhn validation; overflow without partial findings; Unicode horizontal spaces;
-full-span masking; cancellation; overlapping matches; multiple values;
+BR/US/ISO dates and leap years; full-span masking; cancellation; overlapping matches; multiple values;
 default-off behavior; and parity between serial and concurrent execution.
 Reproducible benchmarks compare the feature enabled and disabled on normal and
 PII-containing inputs.

@@ -165,6 +165,11 @@ checksum. PHONE aggregation retains the permissive legacy matcher and can
 over-redact unrelated numeric groups, so activation should be evaluated with
 representative production text.
 
+Valid BR (`DD-MM-YYYY`), US (`MM-DD-YYYY`), and ISO (`YYYY-MM-DD`) dates are
+excluded from contextual PHONE matching. The bounded parser accepts common
+`-`, `.`, and `/` separators, validates leap years and calendar days, and
+supports optional 24-hour time components without adding a regular expression.
+
 ### Custom Rules
 
 ```go

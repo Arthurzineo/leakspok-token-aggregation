@@ -124,6 +124,49 @@ func TestContextualDetectionPhoneStopsAtInvalidBoundary(t *testing.T) {
 	}
 }
 
+func TestContextualDetectionExcludesKnownDatesFromPhone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"Brazilian dash", "evento 31-12-2024 15"},
+		{"Brazilian dot", "evento 31.12.2024 15"},
+		{"Brazilian slash", "evento 31/12/2024 15"},
+		{"Brazilian leap day", "evento 29-02-2024 23"},
+		{"United States dash", "event 12-31-2024 15"},
+		{"United States slash", "event 12/31/2024 15"},
+		{"ISO date", "event 2024-12-31 15"},
+		{"hour and minute", "evento 31-12-2024 15:30"},
+		{"compact hour and minute", "evento 31-12-2024 1530"},
+		{"hour minute and second", "evento 31-12-2024 15:30:45"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ba := makeContextualAnalyzer(t, false)
+			output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+				contextualRule(pattern.EntityPhone, analyzer.REDACT),
+			}, tt.input)
+			assert.Equal(t, tt.input, output)
+			assert.False(t, details.HasFindings)
+		})
+	}
+}
+
+func TestContextualDetectionDoesNotExcludeInvalidCalendarDate(t *testing.T) {
+	t.Parallel()
+
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+	}, "31-02-2024 15")
+	assert.Equal(t, "<PHONE>", output)
+	assert.True(t, details.HasFindings)
+}
+
 func TestContextualDetectionCPF(t *testing.T) {
 	t.Parallel()
 
