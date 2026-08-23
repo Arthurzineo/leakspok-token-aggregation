@@ -175,6 +175,10 @@ Aggregate MASK findings protect the complete formatted span and any final
 overlap union. Single-token findings continue to honor the rule's original
 `MaskSettings.MaxSize`.
 
+When no contextual rule marker is present (no ASCII digit for numeric entities
+and no `@` for EMAIL), enabling the option returns immediately to the legacy
+streaming path. This preserves allocation counts on ordinary marker-free text.
+
 ### Custom Rules
 
 ```go

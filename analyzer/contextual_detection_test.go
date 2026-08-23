@@ -140,6 +140,8 @@ func TestContextualDetectionExcludesKnownDatesFromPhone(t *testing.T) {
 		{"United States slash", "event 12/31/2024 15"},
 		{"ISO date", "event 2024-12-31 15"},
 		{"ISO datetime T", "event 2024-12-31T15:30:45"},
+		{"ISO fractional .NET", "event 2024-12-31T15:30:45.1234567Z"},
+		{"ISO fractional with offset", "event 2024-12-31T15:30:45.123456789-03:00"},
 		{"hour and minute", "evento 31-12-2024 15:30"},
 		{"compact hour and minute", "evento 31-12-2024 1530"},
 		{"space separated hour and minute", "evento 31-12-2024 15 30"},
@@ -405,6 +407,20 @@ func TestContextualDetectionLegacyDefaultRemainsDisabled(t *testing.T) {
 	assert.False(t, details.HasFindings)
 }
 
+func TestContextualDetectionUsesLegacyPathWithoutContextualMarkers(t *testing.T) {
+	t.Parallel()
+
+	input := "ordinary application text without numeric or email markers"
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+		contextualRule(pattern.EntityCPF, analyzer.REDACT),
+		contextualRule(pattern.EntityEmail, analyzer.REDACT),
+	}, input)
+	assert.Equal(t, input, output)
+	assert.False(t, details.HasFindings)
+}
+
 func TestContextualDetectionStringAnalyzer(t *testing.T) {
 	t.Parallel()
 
@@ -470,6 +486,11 @@ func TestContextualDetectionRuleConcurrencyPreservesEntityPriority(t *testing.T)
 	}
 	for range 50 {
 		output, details := anonymizeContextual(t, ba, rules, "529 982 247 25")
+		assert.Equal(t, "<CPF_NUMBER>", output)
+		assert.Contains(t, details.AnonymizedEntities, pattern.EntityCPF)
+	}
+	for range 50 {
+		output, details := anonymizeContextual(t, ba, rules, "52998224725")
 		assert.Equal(t, "<CPF_NUMBER>", output)
 		assert.Contains(t, details.AnonymizedEntities, pattern.EntityCPF)
 	}

@@ -100,7 +100,7 @@ func (t *ByteAnalyzer) Anonymize(ctx context.Context, rules []Rule, output io.Wr
 
 	content := data
 	switch {
-	case t.contextualDetection:
+	case t.contextualDetection && needsContextualDetection(rules, content):
 		var contextualActions []contextualAction
 		var complete bool
 		if t.pool != nil {

@@ -3,6 +3,7 @@ package analyzer
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	analyzercache "github.com/Prosus-Cyber-Xchange/leakspok/analyzer/cache"
 )
@@ -23,6 +24,7 @@ type ConcurrentRulesRunner struct {
 	cache   analyzercache.CacheStore
 	options RunnerOptions
 	pool    WorkerPool
+	stop    sync.Once
 }
 
 // NewConcurrentRulesRunner creates a ConcurrentRulesRunner backed by the given pool.
@@ -170,9 +172,11 @@ func (r *ConcurrentRulesRunner) Process(ctx context.Context, rules []Rule, data 
 // Stop returns without waiting for in-flight tasks to complete. The pool's
 // own lifecycle ensures workers exit cleanly after their current task finishes.
 func (r *ConcurrentRulesRunner) Stop() {
-	// Use a pre-cancelled context so ReleaseContext marks the pool as closed
-	// and returns immediately, without blocking on in-flight workers.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = r.pool.ReleaseContext(ctx)
+	r.stop.Do(func() {
+		// Use a pre-cancelled context so ReleaseContext marks the pool as closed
+		// and returns immediately, without blocking on in-flight workers.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = r.pool.ReleaseContext(ctx)
+	})
 }

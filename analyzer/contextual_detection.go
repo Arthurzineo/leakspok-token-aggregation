@@ -71,6 +71,31 @@ func buildContextualCandidates(ctx context.Context, input []byte, tokens []Token
 	return candidates
 }
 
+func needsContextualDetection(rules []Rule, input []byte) bool {
+	var numeric, email bool
+	for _, rule := range rules {
+		if rule.Disable || rule.Matcher == nil {
+			continue
+		}
+		switch rule.Matcher.Entity() { //nolint:exhaustive // Only contextual entities affect the marker scan.
+		case pattern.EntityPhone, pattern.EntityCPF, pattern.EntityCreditCard:
+			numeric = true
+		case pattern.EntityEmail:
+			email = true
+		default:
+		}
+	}
+	if !numeric && !email {
+		return false
+	}
+	for _, char := range input {
+		if numeric && char >= '0' && char <= '9' || email && char == '@' {
+			return true
+		}
+	}
+	return false
+}
+
 func isHorizontalGap(gap []byte, allowParentheses bool) bool {
 	if len(gap) == 0 {
 		return false
@@ -177,14 +202,55 @@ func parseCompactTime(value []byte) bool {
 		minute, minuteOK := parseTwoDigits(value[3:])
 		return value[2] == ':' && hourOK && minuteOK && hour < 24 && minute < 60
 	case 8:
-		hour, hourOK := parseTwoDigits(value[:2])
-		minute, minuteOK := parseTwoDigits(value[3:5])
-		second, secondOK := parseTwoDigits(value[6:])
-		return value[2] == ':' && value[5] == ':' && hourOK && minuteOK && secondOK &&
-			hour < 24 && minute < 60 && second < 60
+		return parseClockWithSeconds(value)
 	default:
+		return parseISOClock(value)
+	}
+}
+
+func parseClockWithSeconds(value []byte) bool {
+	if len(value) != 8 || value[2] != ':' || value[5] != ':' {
 		return false
 	}
+	hour, hourOK := parseTwoDigits(value[:2])
+	minute, minuteOK := parseTwoDigits(value[3:5])
+	second, secondOK := parseTwoDigits(value[6:])
+	return hourOK && minuteOK && secondOK && hour < 24 && minute < 60 && second < 60
+}
+
+func parseTimezone(value []byte) bool {
+	if len(value) == 0 {
+		return true
+	}
+	if len(value) == 1 && (value[0] == 'Z' || value[0] == 'z') {
+		return true
+	}
+	if len(value) != 6 || (value[0] != '+' && value[0] != '-') || value[3] != ':' {
+		return false
+	}
+	hour, hourOK := parseTwoDigits(value[1:3])
+	minute, minuteOK := parseTwoDigits(value[4:])
+	return hourOK && minuteOK && hour < 24 && minute < 60
+}
+
+func parseISOClock(value []byte) bool {
+	if len(value) < 8 || !parseClockWithSeconds(value[:8]) {
+		return false
+	}
+	remainder := value[8:]
+	if len(remainder) == 0 || remainder[0] != '.' {
+		return parseTimezone(remainder)
+	}
+
+	fractionEnd := 1
+	for fractionEnd < len(remainder) && fractionEnd <= 9 &&
+		remainder[fractionEnd] >= '0' && remainder[fractionEnd] <= '9' {
+		fractionEnd++
+	}
+	if fractionEnd == 1 {
+		return false
+	}
+	return parseTimezone(remainder[fractionEnd:])
 }
 
 func parseKnownTime(value []byte) bool {
@@ -273,16 +339,32 @@ func appendNumericToken(dst []byte, token []byte, first bool) ([]byte, int, bool
 }
 
 func isNumericCandidateToken(token []byte) bool {
-	_, _, ok := appendNumericToken(nil, token, true)
-	return ok
+	return isNumericToken(token, true)
 }
 
 func isNumericContinuationToken(token []byte) bool {
-	_, _, ok := appendNumericToken(nil, token, false)
-	return ok
+	return isNumericToken(token, false)
+}
+
+func isNumericToken(token []byte, first bool) bool {
+	digits := 0
+	for index, char := range token {
+		switch {
+		case char >= '0' && char <= '9':
+			digits++
+		case char == '+' && first && index == 0:
+		case char == '.' || char == '-':
+		default:
+			return false
+		}
+	}
+	return digits > 0 || first && bytes.Equal(token, []byte("+"))
 }
 
 func scanNumericChain(input []byte, tokens []Token, start int) (int, []byte, int, bool, bool) {
+	if !isNumericCandidateToken(tokens[start].Content) {
+		return start, nil, 0, false, false
+	}
 	canonical, digits, ok := appendNumericToken(
 		make([]byte, 0, maxNumericCandidateBytes),
 		tokens[start].Content,
@@ -490,15 +572,52 @@ func (t *ByteAnalyzer) processContextualCandidate(ctx context.Context, candidate
 	return Rule{}, false
 }
 
+func numericDigitCount(value []byte) (int, bool) {
+	if !isNumericCandidateToken(value) {
+		return 0, false
+	}
+	digits := 0
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			digits++
+		}
+	}
+	return digits, true
+}
+
+func (t *ByteAnalyzer) processContextualToken(ctx context.Context, rules []Rule, data []byte) (Rule, bool) {
+	rules = excludePhoneForKnownDate(rules, data)
+	digits, numeric := numericDigitCount(data)
+	if !numeric || digits != 11 {
+		return t.ruleRunner.Process(ctx, rules, data)
+	}
+
+	cpfRules := contextualRules(rules, pattern.EntityCPF)
+	phoneRules := contextualRules(rules, pattern.EntityPhone)
+	if len(cpfRules) == 0 || len(phoneRules) == 0 {
+		return t.ruleRunner.Process(ctx, rules, data)
+	}
+	if matched, found := t.ruleRunner.Process(ctx, cpfRules, data); found {
+		return matched, true
+	}
+
+	remaining := make([]Rule, 0, len(rules)-len(cpfRules))
+	for _, rule := range rules {
+		if rule.Matcher == nil || rule.Matcher.Entity() != pattern.EntityCPF {
+			remaining = append(remaining, rule)
+		}
+	}
+	return t.ruleRunner.Process(ctx, remaining, data)
+}
+
 func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules []Rule, content []byte) ([]contextualAction, bool) {
 	tokens := collectTokens(content)
-	actions := make([]contextualAction, 0, len(tokens))
+	actions := make([]contextualAction, 0, min(len(tokens), 16))
 	for _, token := range tokens {
 		if ctx.Err() != nil {
 			return nil, false
 		}
-		tokenRules := excludePhoneForKnownDate(rules, token.Content)
-		if matched, found := t.ruleRunner.Process(ctx, tokenRules, token.Content); found {
+		if matched, found := t.processContextualToken(ctx, rules, token.Content); found {
 			actions = append(actions, actionForMatch(token, matched, false))
 		}
 	}
@@ -536,7 +655,7 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 			if aggregate {
 				matched, found = t.processContextualCandidate(ctx, candidate)
 			} else {
-				matched, found = t.ruleRunner.Process(ctx, selectedRules, data)
+				matched, found = t.processContextualToken(ctx, selectedRules, data)
 			}
 			if found {
 				mu.Lock()
@@ -553,8 +672,7 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 	}
 
 	for _, token := range tokens {
-		tokenRules := excludePhoneForKnownDate(rules, token.Content)
-		if !submit(token, token.Content, tokenRules, false) {
+		if !submit(token, token.Content, rules, false) {
 			complete = false
 			break
 		}

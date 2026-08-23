@@ -32,6 +32,8 @@ semantics instead of introducing a second matching system.
   leave matched bytes exposed.
 - Candidate scanning is bounded and overlap resolution is `O(n log n)`.
 - The existing bounded worker pool is reused in concurrent mode.
+- Inputs without a possible contextual marker (ASCII digit for numeric entities
+  or `@` for EMAIL) return to the legacy path before token materialization.
 
 These constraints are important because unrestricted token concatenation could
 create false positives, join unrelated data, or cause excessive CPU and memory
@@ -93,8 +95,9 @@ and leap years, so `29-02-2024` is excluded from PHONE while `31-02-2024` is not
 Ambiguous values such as `05-06-2024` are considered a date when either the BR
 or US interpretation is valid.
 
-ISO date-times using `T`/`t`, such as `2026-08-23T14:30:00`, and times split into
-separate fields, such as `23-08-2026 14 30 45`, are also recognized.
+ISO date-times using `T`/`t`, such as `2026-08-23T14:30:00`, optional fractional
+seconds with one to nine digits and `Z` or numeric timezone offsets, and times
+split into separate fields, such as `23-08-2026 14 30 45`, are also recognized.
 
 The date check is a bounded byte parser, not a new regular expression or a
 general natural-language date parser. Numeric candidates remain capped at 64
@@ -196,11 +199,16 @@ to `false`.
   scanner does not restart inside that run, so a phone embedded after a long
   uninterrupted numeric prefix can be missed. This favors avoiding partial or
   manufactured findings.
+- Independent legacy findings already identified inside a rejected contextual
+  chain remain valid. For example, `11 987654321 +5` can anonymize the phone
+  portion while preserving the invalid trailing `+5`.
 - Cancellation or worker-pool failure fails closed by writing no output, but the
   current `Anonymize` API has no error return. Callers cannot distinguish that
   result from an empty output through `AnonymizationDetails` alone.
-- Contextual mode materializes all tokenizer tokens to preserve original spans
-  and resolve overlaps. This uses more memory than the streaming legacy path.
+- When the marker gate selects contextual processing, the analyzer materializes
+  tokenizer tokens to preserve original spans and resolve overlaps. This uses
+  more memory than the streaming legacy path for inputs that actually contain
+  numeric or email markers.
 - The feature is configured through `MakeByteAnalyzer`/`MakeStringAnalyzer`;
   the lower-level `NewByteAnalyzer` constructor does not expose the option.
 - Contextual cards require Luhn while the legacy single-token card matcher keeps
