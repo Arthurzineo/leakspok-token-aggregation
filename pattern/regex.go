@@ -538,6 +538,33 @@ func MatchMasterCardCreditCard(_ context.Context, input []byte) bool {
 	return true
 }
 
+// MatchCreditCardLuhn validates the checksum of a 16-digit Visa or MasterCard
+// candidate without changing the compatibility behavior of the legacy matchers.
+func MatchCreditCardLuhn(ctx context.Context, input []byte) bool {
+	if !MatchVisaCreditCard(ctx, input) && !MatchMasterCardCreditCard(ctx, input) {
+		return false
+	}
+	stripSet := map[rune]struct{}{' ': {}, '-': {}}
+	return matchLuhn(stripChars(stripSet, input))
+}
+
+func matchLuhn(digits []byte) bool {
+	sum := 0
+	double := false
+	for index := len(digits) - 1; index >= 0; index-- {
+		value := int(digits[index] - '0')
+		if double {
+			value *= 2
+			if value > 9 {
+				value -= 9
+			}
+		}
+		sum += value
+		double = !double
+	}
+	return sum%10 == 0
+}
+
 // isValidVINChar checks if a byte is a valid VIN character.
 // VINs use uppercase letters A-Z and digits 0-9, excluding I, O, Q per ISO 3779.
 func isValidVINChar(b byte) bool {

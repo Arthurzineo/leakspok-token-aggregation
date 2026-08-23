@@ -6,8 +6,9 @@ Leakspok normally evaluates each tokenizer output independently. That fast path
 works for values contained in one token, but formatted PII may be split into
 several tokens. Examples include `+55 54 99912 0654`,
 `5 5 5 4 9 9 9 1 2 0 6 5 4`, `529 982 247 25`, and
-`test @ example . com`. None of the individual fragments is sufficient for the
-existing PHONE, CPF, or EMAIL matcher, even though the complete value is PII.
+`test @ example . com`. Credit cards such as `5200 1000 0000 2803` are also
+split by horizontal whitespace. None of the individual fragments is sufficient
+for the corresponding matcher, even though the complete value is PII.
 
 The new opt-in contextual path joins only adjacent, compatible fragments into a
 canonical candidate, validates that candidate with the existing matchers, and
@@ -18,16 +19,17 @@ semantics instead of introducing a second matching system.
 ## Design and safety bounds
 
 - Disabled by default through `RunnerOptions.ContextualDetection.Enabled`.
-- Limited initially to PHONE, CPF, and EMAIL rules.
+- Limited initially to PHONE, CPF, CREDIT_CARD, and EMAIL rules.
 - Numeric candidates accept only digits and an allowlisted set of formatting
-  characters. They are bounded to 16 tokens, 64 bytes, and 15 digits.
+  characters. They are bounded to 17 tokens, 64 bytes, and 16 digits.
 - Email candidates use a small, allowlisted grammar and are bounded to 5 tokens
   and 254 bytes.
 - Words, newlines, and unsupported separators stop aggregation.
 - Findings retain offsets into the original input; formatting is never silently
   removed from the output.
-- Overlapping findings are resolved deterministically, preferring the largest
-  validated span.
+- Overlapping findings are resolved deterministically. Their union is protected
+  with the settings of the largest validated span so a chained overlap cannot
+  leave matched bytes exposed.
 - Candidate scanning is bounded and overlap resolution is `O(n log n)`.
 - The existing bounded worker pool is reused in concurrent mode.
 
@@ -45,8 +47,10 @@ combined.
 | Original fragments | Canonical candidate | Entity | Result |
 |---|---|---|---|
 | `+55` `54` `99912` `0654` | `+5554999120654` | PHONE | accepted if the phone matcher validates it |
-| `5` `5` `5` `4` `9` `9` `9` `1` `2` `0` `6` `5` `4` | `5554999120654` | PHONE | accepted; 13 digit tokens remain within the 16-token limit |
+| `5` `5` `5` `4` `9` `9` `9` `1` `2` `0` `6` `5` `4` | `5554999120654` | PHONE | accepted; 13 digit tokens remain within the 17-token limit |
 | `529` `982` `247` `25` | `52998224725` | CPF | accepted only when the CPF checksum is valid |
+| `5200` `1000` `0000` `2803` | `5200100000002803` | CREDIT_CARD | accepted only for a supported prefix and valid Luhn checksum |
+| `5` `2` `0` `0` `1` `0` `0` `0` `0` `0` `0` `0` `2` `8` `0` `3` | `5200100000002803` | CREDIT_CARD | accepted at the 16-digit bound |
 | `test` `@` `example` `.` `com` | `test@example.com` | EMAIL | accepted; exactly the 5-token email limit |
 
 For example, with `call +55 54 99912 0654 now`, the phone matcher receives
@@ -60,16 +64,31 @@ Examples that stop or are rejected:
   not aggregated across the line boundary.
 - `55 code 54 code 99912`: words between numeric fragments stop the numeric
   scanner.
-- Numeric input beyond 15 digits, 16 tokens, or 64 bytes: the scanner never
-  extends a candidate beyond the applicable bound.
+- Numeric input beyond 16 digits, 17 tokens, or 64 bytes: the complete chain is
+  rejected and no shorter prefix is emitted as a finding.
 - `test @ unrelated words example . com`: the email grammar does not skip words
   to manufacture an address.
 - Longer email-like input: the scanner never extends a candidate beyond 5
-  tokens or 254 bytes.
+  tokens or 254 bytes, and it does not redact a bounded prefix when a connected
+  suffix indicates that the address continues.
 
 The limits control worst-case work per starting token. They do not make a
 candidate a finding by themselves; the corresponding existing matcher must
 still validate the canonical value.
+
+## Documented false-positive trade-off
+
+Contextual PHONE detection deliberately reuses the legacy `PhoneMatcher`, whose
+regex accepts short phone-like digit sequences and is not anchored to a stricter
+regional numbering plan. With the feature enabled, unrelated horizontal numeric
+groups such as `Sala 101 202 303` or a date/time-like value such as
+`12-05-2024 15` may canonicalize to a value accepted as PHONE. This is a known
+false-positive trade-off and a reason the feature remains disabled by default.
+
+Credit-card candidates are treated differently: a complete 16-digit numeric
+chain is evaluated only by CREDIT_CARD rules and must pass a contextual Luhn
+check. It is not offered to PHONE or CPF rules. The legacy single-token card
+matcher keeps its prior compatibility behavior.
 
 ## Usage
 
@@ -104,6 +123,8 @@ tokens. Each canonical candidate is evaluated by the same `RuleRunner` used by
 the original path. A successful match produces an action whose span covers the
 corresponding bytes in the original input. Finally, legacy and contextual
 actions are merged and overlaps are resolved before output is written.
+A numeric chain that exceeds a configured bound is discarded as a whole rather
+than producing a finding for one of its prefixes.
 
 ```text
                          +-> individual token -> RuleRunner --+
@@ -120,8 +141,8 @@ implementation, avoiding contextual candidate allocation.
 
 - `analyzer/contextual_detection.go`: candidate construction for numeric and
   email entities, canonicalization, bounded scanning, contextual rule
-  execution, cancellation handling, exception suppression, and deterministic
-  overlap resolution.
+  execution, cancellation handling, full-chain overflow rejection, and
+  deterministic overlap resolution.
 - `analyzer/contextual_detection_test.go`: table-driven functional tests,
   serial/concurrent parity tests, boundary and overlap cases, default-off
   compatibility checks, and performance benchmarks.
@@ -134,20 +155,25 @@ implementation, avoiding contextual candidate allocation.
   `RunnerOptions` and propagates it when byte and string analyzers are created.
 - `analyzer/byte_analyzer.go`: selects the contextual execution path only when
   enabled and combines validated contextual actions with normal token actions.
+- `pattern/regex.go`: adds an additive Luhn validator used by contextual card
+  candidates without changing legacy Visa/Mastercard matcher compatibility.
 - `README.md`: documents the opt-in feature, supported entities, configuration,
   and bounded behavior.
 
-No matcher implementation, rule format, anonymization strategy, exception
-model, or cache API was replaced. The change is additive and the public option
-defaults to `false`.
+No rule format, exception model, or cache API was replaced. Contextual MASK
+protects the complete formatted span, aggregate exceptions do not cancel an
+independent legacy finding, and cancellation writes no partially analyzed
+output. The change is additive and the public option defaults to `false`.
 
 ## Verification
 
-The test suite covers fragmented PHONE, CPF, and EMAIL values; a phone with
+The test suite covers fragmented PHONE, CPF, CREDIT_CARD, and EMAIL values; a phone with
 every digit separated, with and without `+`; invalid boundaries; exceptions;
-masking; overlapping matches; multiple values; default-off behavior; and parity
-between serial and concurrent execution. Reproducible benchmarks compare the
-feature enabled and disabled on normal and PII-containing inputs.
+Luhn validation; overflow without partial findings; Unicode horizontal spaces;
+full-span masking; cancellation; overlapping matches; multiple values;
+default-off behavior; and parity between serial and concurrent execution.
+Reproducible benchmarks compare the feature enabled and disabled on normal and
+PII-containing inputs.
 
 Run all checks with:
 

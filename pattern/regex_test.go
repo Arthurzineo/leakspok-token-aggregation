@@ -418,6 +418,32 @@ func TestMatchMasterCardCreditCard(t *testing.T) {
 	}
 }
 
+func TestMatchCreditCardLuhn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"4111111111111111", true},
+		{"4111 1111 1111 1111", true},
+		{"5200100000002803", true},
+		{"5200-1000-0000-2803", true},
+		{"4111111111111112", false},
+		{"5200100000002806", false},
+		{"1234567890123452", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			if got := pattern.MatchCreditCardLuhn(t.Context(), []byte(tt.input)); got != tt.expected {
+				t.Fatalf("MatchCreditCardLuhn(%q) = %v, want %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestMatchFunctionsEdgeCases(t *testing.T) {
 	ctx := context.Background()
 

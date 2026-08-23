@@ -145,7 +145,7 @@ ba, err := analyzer.MakeByteAnalyzer(logger, opts)
 
 ### Contextual multi-token detection
 
-PHONE, CPF and EMAIL values split by horizontal delimiters can be detected with
+PHONE, CPF, CREDIT_CARD and EMAIL values split by horizontal delimiters can be detected with
 the bounded contextual path. It is disabled by default:
 
 ```go
@@ -157,6 +157,13 @@ opts := analyzer.RunnerOptions{
 The tokenizer and single-token fast path remain unchanged. Contextual candidates
 are validated by the configured rules and matchers, while anonymization uses the
 original input offsets.
+
+Numeric candidates are bounded to complete chains of at most 16 digits, 17
+tokens, and 64 bytes. Over-limit chains do not emit partial-prefix findings.
+Contextual cards require a supported Visa/Mastercard prefix and valid Luhn
+checksum. PHONE aggregation retains the permissive legacy matcher and can
+over-redact unrelated numeric groups, so activation should be evaluated with
+representative production text.
 
 ### Custom Rules
 

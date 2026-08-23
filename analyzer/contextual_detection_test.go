@@ -22,6 +22,8 @@ func contextualRule(entity pattern.Entity, strategy analyzer.AnonymizeStrategy) 
 		matcher = pattern.CPFMatcher()
 	case pattern.EntityEmail:
 		matcher = pattern.EmailMatcher()
+	case pattern.EntityCreditCard:
+		matcher = pattern.CreditCardMatcher()
 	default:
 		panic("unsupported contextual test entity")
 	}
@@ -148,6 +150,59 @@ func TestContextualDetectionCPF(t *testing.T) {
 	}
 }
 
+func TestContextualDetectionCreditCard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"groups separated by spaces", "5200 1000 0000 2803"},
+		{"mixed spaces and dashes", "5200-1000 0000-2803"},
+		{"every digit separated", "5 2 0 0 1 0 0 0 0 0 0 0 2 8 0 3"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ba := makeContextualAnalyzer(t, false)
+			output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+				contextualRule(pattern.EntityPhone, analyzer.REDACT),
+				contextualRule(pattern.EntityCreditCard, analyzer.REDACT),
+			}, tt.input)
+			assert.Equal(t, "<CREDIT_CARD>", output)
+			assert.Contains(t, details.DetectedEntities, pattern.EntityCreditCard)
+			assert.ElementsMatch(t, []pattern.Entity{pattern.EntityCreditCard}, details.AnonymizedEntities)
+		})
+	}
+}
+
+func TestContextualDetectionDoesNotRedactNumericPrefixBeyondBounds(t *testing.T) {
+	t.Parallel()
+
+	input := "4539 1488 0343 6467 9"
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+		contextualRule(pattern.EntityCreditCard, analyzer.REDACT),
+	}, input)
+	assert.Equal(t, input, output)
+	assert.False(t, details.HasFindings)
+}
+
+func TestContextualDetectionRejectsInvalidCardChecksum(t *testing.T) {
+	t.Parallel()
+
+	input := "5200 1000 0000 2806"
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+		contextualRule(pattern.EntityCreditCard, analyzer.REDACT),
+	}, input)
+	assert.Equal(t, input, output)
+	assert.False(t, details.HasFindings)
+}
+
 func TestContextualDetectionEmail(t *testing.T) {
 	t.Parallel()
 
@@ -161,6 +216,7 @@ func TestContextualDetectionEmail(t *testing.T) {
 		{"spaces around at", "test @ example.com", "<EMAIL>"},
 		{"space before suffix", "test@example .com", "<EMAIL>"},
 		{"fully fragmented", "test @ example . com", "<EMAIL>"},
+		{"does not redact bounded prefix", "test @ example . com . br", "test @ example . com . br"},
 		{"missing local", "@ example.com", "@ example.com"},
 		{"missing domain", "test @", "test @"},
 		{"word after at", "test @ isso nao e dominio example . com", "test @ isso nao e dominio example . com"},
@@ -189,7 +245,27 @@ func TestContextualDetectionPreservesMaskSemanticsOnOriginalRange(t *testing.T) 
 
 	ba := makeContextualAnalyzer(t, false)
 	output, _ := anonymizeContextual(t, ba, []analyzer.Rule{contextualRule(pattern.EntityPhone, analyzer.MASK)}, "+55 54 99912 0654")
-	assert.Equal(t, "*** 54 99912 0654", output)
+	assert.Equal(t, "*****************", output)
+}
+
+func TestContextualDetectionSupportsUnicodeHorizontalSpaces(t *testing.T) {
+	t.Parallel()
+
+	ba := makeContextualAnalyzer(t, false)
+	output, _ := anonymizeContextual(t, ba, []analyzer.Rule{contextualRule(pattern.EntityPhone, analyzer.REDACT)}, "+55\u00a054\u202f99912 0654")
+	assert.Equal(t, "<PHONE>", output)
+}
+
+func TestContextualDetectionCancellationWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	ba := makeContextualAnalyzer(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var output bytes.Buffer
+	details := ba.Anonymize(ctx, []analyzer.Rule{contextualRule(pattern.EntityPhone, analyzer.REDACT)}, &output, []byte("+55 54 99912 0654"))
+	assert.Empty(t, output.String())
+	assert.False(t, details.HasFindings)
 }
 
 func TestContextualDetectionHonorsCanonicalException(t *testing.T) {
@@ -208,6 +284,24 @@ func TestContextualDetectionHonorsCanonicalException(t *testing.T) {
 	output, details := anonymizeContextual(t, ba, []analyzer.Rule{rule}, "+55 54 99912 0654")
 	assert.Equal(t, "+55 54 99912 0654", output)
 	assert.False(t, details.HasFindings)
+}
+
+func TestContextualExceptionDoesNotSuppressLegacyFinding(t *testing.T) {
+	t.Parallel()
+
+	rule := contextualRule(pattern.EntityPhone, analyzer.REDACT)
+	rule.Exceptions = []analyzer.Exception{{
+		Reason: "aggregate-only exception",
+		Matcher: pattern.NewPatternMatcher(
+			"EXCEPTION",
+			pattern.Equal([]byte("123456789")),
+		),
+	}}
+
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{rule}, "1234567 89")
+	assert.Equal(t, "<PHONE> 89", output)
+	assert.True(t, details.HasFindings)
 }
 
 func TestContextualDetectionLegacyDefaultRemainsDisabled(t *testing.T) {
@@ -283,7 +377,7 @@ func BenchmarkByteAnalyzerContextual(b *testing.B) {
 		"PhoneFragmented":    []byte("contact +55 54 99912 0654 today"),
 		"CPFFragmented":      []byte("document 529 982 247 25"),
 		"EmailFragmented":    []byte("contact test @ example . com"),
-		"NumericAdversarial": bytes.Repeat([]byte("1 2 3 4 5 6 7 8 9 0 "), 256),
+		"NumericAdversarial": bytes.Repeat([]byte("x 1 2 3 4 5 6 7 8 y "), 256),
 	}
 
 	for name, input := range inputs {

@@ -102,16 +102,22 @@ func (t *ByteAnalyzer) Anonymize(ctx context.Context, rules []Rule, output io.Wr
 	switch {
 	case t.contextualDetection:
 		var contextualActions []contextualAction
+		var complete bool
 		if t.pool != nil {
-			contextualActions = t.anonymizeConcurrentContextual(ctx, rules, content)
+			contextualActions, complete = t.anonymizeConcurrentContextual(ctx, rules, content)
 		} else {
-			contextualActions = t.anonymizeSequentialContextual(ctx, rules, content)
+			contextualActions, complete = t.anonymizeSequentialContextual(ctx, rules, content)
+		}
+		if !complete {
+			return AnonymizationDetails{}
+		}
+		for _, action := range contextualActions {
+			detectedEntities[action.entity] = struct{}{}
 		}
 		contextualActions = resolveAnonymizationActions(contextualActions)
 		actions = make([]anonymizationAction, 0, len(contextualActions))
 		for _, action := range contextualActions {
 			actions = append(actions, action.action)
-			detectedEntities[action.entity] = struct{}{}
 			anonymizedEntities[action.entity] = struct{}{}
 		}
 	case t.pool != nil:

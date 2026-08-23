@@ -5,18 +5,20 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Prosus-Cyber-Xchange/leakspok/pattern"
 )
 
 const (
-	// A phone may arrive with every digit tokenized separately (plus an isolated
-	// country-code marker). Keep the scan bounded while covering all 15 digits.
-	maxNumericCandidateTokens = 16
+	// A card may arrive with every digit tokenized separately. An extra token
+	// accommodates an isolated leading plus for phone candidates.
+	maxNumericCandidateTokens = 17
 	maxEmailCandidateTokens   = 5
 	maxNumericCandidateBytes  = 64
 	maxEmailCandidateBytes    = 254
-	maxNumericCandidateDigits = 15
+	maxNumericCandidateDigits = 16
 )
 
 type contextualCandidate struct {
@@ -26,19 +28,20 @@ type contextualCandidate struct {
 }
 
 type contextualAction struct {
-	action   anonymizationAction
-	entity   pattern.Entity
-	suppress bool
+	action anonymizationAction
+	entity pattern.Entity
 }
 
 func contextualRules(rules []Rule, entities ...pattern.Entity) []Rule {
 	selected := make([]Rule, 0, len(rules))
-	for _, rule := range rules {
-		if rule.Disable || rule.Matcher == nil {
-			continue
-		}
-		if slices.Contains(entities, rule.Matcher.Entity()) {
-			selected = append(selected, rule)
+	for _, entity := range entities {
+		for _, rule := range rules {
+			if rule.Disable || rule.Matcher == nil {
+				continue
+			}
+			if rule.Matcher.Entity() == entity {
+				selected = append(selected, rule)
+			}
 		}
 	}
 	return selected
@@ -52,12 +55,12 @@ func collectTokens(input []byte) []Token {
 	return tokens
 }
 
-func buildContextualCandidates(input []byte, tokens []Token, rules []Rule) []contextualCandidate {
+func buildContextualCandidates(ctx context.Context, input []byte, tokens []Token, rules []Rule) []contextualCandidate {
 	var candidates []contextualCandidate
 
-	numericRules := contextualRules(rules, pattern.EntityPhone, pattern.EntityCPF)
+	numericRules := contextualRules(rules, pattern.EntityCreditCard, pattern.EntityCPF, pattern.EntityPhone)
 	if len(numericRules) > 0 {
-		candidates = append(candidates, buildNumericCandidates(input, tokens, numericRules)...)
+		candidates = append(candidates, buildNumericCandidates(ctx, input, tokens, numericRules)...)
 	}
 
 	emailRules := contextualRules(rules, pattern.EntityEmail)
@@ -72,10 +75,15 @@ func isHorizontalGap(gap []byte, allowParentheses bool) bool {
 	if len(gap) == 0 {
 		return false
 	}
-	for _, char := range gap {
-		switch char {
-		case ' ', '\t':
-		case '(', ')':
+	for len(gap) > 0 {
+		char, size := utf8.DecodeRune(gap)
+		if char == utf8.RuneError && size == 1 {
+			return false
+		}
+		gap = gap[size:]
+		switch {
+		case unicode.IsSpace(char) && char != '\n' && char != '\r' && char != '\v' && char != '\f':
+		case char == '(' || char == ')':
 			if !allowParentheses {
 				return false
 			}
@@ -84,6 +92,17 @@ func isHorizontalGap(gap []byte, allowParentheses bool) bool {
 		}
 	}
 	return true
+}
+
+func rulesForNumericDigits(rules []Rule, digits int) []Rule {
+	entities := []pattern.Entity{pattern.EntityPhone}
+	switch digits {
+	case 11:
+		entities = []pattern.Entity{pattern.EntityCPF, pattern.EntityPhone}
+	case 16:
+		entities = []pattern.Entity{pattern.EntityCreditCard}
+	}
+	return contextualRules(rules, entities...)
 }
 
 func appendNumericToken(dst []byte, token []byte, first bool) ([]byte, int, bool) {
@@ -111,8 +130,41 @@ func isNumericCandidateToken(token []byte) bool {
 	return ok
 }
 
-//nolint:gocognit // Bounded scanner keeps all stop conditions explicit and local.
-func buildNumericCandidates(input []byte, tokens []Token, rules []Rule) []contextualCandidate {
+func scanNumericChain(input []byte, tokens []Token, start int) (int, []byte, int, bool, bool) {
+	canonical, digits, ok := appendNumericToken(
+		make([]byte, 0, maxNumericCandidateBytes),
+		tokens[start].Content,
+		true,
+	)
+	if !ok || digits > maxNumericCandidateDigits || len(canonical) > maxNumericCandidateBytes {
+		return start, nil, 0, false, false
+	}
+
+	end := start
+	for next := start + 1; next < len(tokens); next++ {
+		if !isHorizontalGap(input[tokens[next-1].End:tokens[next].Start], true) ||
+			!isNumericCandidateToken(tokens[next].Content) {
+			break
+		}
+		if next-start+1 > maxNumericCandidateTokens {
+			return end, canonical, digits, true, true
+		}
+
+		var added int
+		canonical, added, ok = appendNumericToken(canonical, tokens[next].Content, false)
+		if !ok {
+			break
+		}
+		digits += added
+		if digits > maxNumericCandidateDigits || len(canonical) > maxNumericCandidateBytes {
+			return end, canonical, digits, true, true
+		}
+		end = next
+	}
+	return end, canonical, digits, false, true
+}
+
+func buildNumericCandidates(ctx context.Context, input []byte, tokens []Token, rules []Rule) []contextualCandidate {
 	var candidates []contextualCandidate
 	for start := range tokens {
 		if start > 0 &&
@@ -121,41 +173,22 @@ func buildNumericCandidates(input []byte, tokens []Token, rules []Rule) []contex
 			continue
 		}
 
-		canonical := make([]byte, 0, maxNumericCandidateBytes)
-		var digits int
-		var ok bool
-		canonical, digits, ok = appendNumericToken(canonical, tokens[start].Content, true)
-		if !ok {
+		end, canonical, digits, overflow, ok := scanNumericChain(input, tokens, start)
+		if !ok || overflow || end == start {
 			continue
 		}
-
-		limit := min(len(tokens), start+maxNumericCandidateTokens)
-		for end := start + 1; end < limit; end++ {
-			if !isHorizontalGap(input[tokens[end-1].End:tokens[end].Start], true) {
-				break
-			}
-
-			before := len(canonical)
-			var added int
-			canonical, added, ok = appendNumericToken(canonical, tokens[end].Content, false)
-			if !ok {
-				break
-			}
-			digits += added
-			if digits > maxNumericCandidateDigits || len(canonical) > maxNumericCandidateBytes {
-				break
-			}
-
-			if len(canonical) == before {
-				continue
-			}
-			data := bytes.Clone(canonical)
-			candidates = append(candidates, contextualCandidate{
-				span:  Token{Start: tokens[start].Start, End: tokens[end].End},
-				data:  data,
-				rules: rules,
-			})
+		selectedRules := rulesForNumericDigits(rules, digits)
+		if len(selectedRules) == 0 {
+			continue
 		}
+		if digits == 16 && !pattern.MatchCreditCardLuhn(ctx, canonical) {
+			continue
+		}
+		candidates = append(candidates, contextualCandidate{
+			span:  Token{Start: tokens[start].Start, End: tokens[end].End},
+			data:  bytes.Clone(canonical),
+			rules: selectedRules,
+		})
 	}
 	return candidates
 }
@@ -226,6 +259,15 @@ func isPlausibleEmail(candidate []byte) bool {
 	return dot > 0 && dot < len(domain)-1
 }
 
+func hasEmailContinuation(input []byte, tokens []Token, end int) bool {
+	if end+1 >= len(tokens) ||
+		!isHorizontalGap(input[tokens[end].End:tokens[end+1].Start], false) {
+		return false
+	}
+	next := tokens[end+1].Content
+	return len(next) > 0 && (next[0] == '.' || next[0] == '@')
+}
+
 func buildEmailCandidates(input []byte, tokens []Token, rules []Rule) []contextualCandidate {
 	var candidates []contextualCandidate
 	for start := range tokens {
@@ -234,6 +276,9 @@ func buildEmailCandidates(input []byte, tokens []Token, rules []Rule) []contextu
 		}
 
 		canonical := bytes.Clone(tokens[start].Content)
+		if len(canonical) > maxEmailCandidateBytes {
+			continue
+		}
 		limit := min(len(tokens), start+maxEmailCandidateTokens)
 		for end := start + 1; end < limit; end++ {
 			if !isHorizontalGap(input[tokens[end-1].End:tokens[end].Start], false) ||
@@ -244,7 +289,7 @@ func buildEmailCandidates(input []byte, tokens []Token, rules []Rule) []contextu
 				break
 			}
 			canonical = append(canonical, tokens[end].Content...)
-			if isPlausibleEmail(canonical) {
+			if isPlausibleEmail(canonical) && !hasEmailContinuation(input, tokens, end) {
 				candidates = append(candidates, contextualCandidate{
 					span:  Token{Start: tokens[start].Start, End: tokens[end].End},
 					data:  bytes.Clone(canonical),
@@ -258,56 +303,49 @@ func buildEmailCandidates(input []byte, tokens []Token, rules []Rule) []contextu
 }
 
 func actionForMatch(span Token, matched Rule) contextualAction {
+	settings := matched.Settings
+	if settings.Strategy == MASK && settings.Mask != nil {
+		mask := *settings.Mask
+		mask.MaxSize = span.Len()
+		settings.Mask = &mask
+	}
 	return contextualAction{
-		action: anonymizationAction{token: span, settings: matched.Settings},
+		action: anonymizationAction{token: span, settings: settings},
 		entity: matched.Matcher.Entity(),
 	}
 }
 
-func exceptionActions(ctx context.Context, candidate contextualCandidate) []contextualAction {
-	var actions []contextualAction
-	for _, rule := range candidate.rules {
-		if isException(ctx, candidate.data, rule.Exceptions) {
-			actions = append(actions, contextualAction{
-				action: anonymizationAction{token: candidate.span},
-				entity: rule.Matcher.Entity(), suppress: true,
-			})
-		}
-	}
-	return actions
-}
-
-func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules []Rule, content []byte) []contextualAction {
+func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules []Rule, content []byte) ([]contextualAction, bool) {
 	tokens := collectTokens(content)
 	actions := make([]contextualAction, 0, len(tokens))
 	for _, token := range tokens {
 		if ctx.Err() != nil {
-			break
+			return nil, false
 		}
 		if matched, found := t.ruleRunner.Process(ctx, rules, token.Content); found {
 			actions = append(actions, actionForMatch(token, matched))
 		}
 	}
 
-	for _, candidate := range buildContextualCandidates(content, tokens, rules) {
+	for _, candidate := range buildContextualCandidates(ctx, content, tokens, rules) {
 		if ctx.Err() != nil {
-			break
+			return nil, false
 		}
-		actions = append(actions, exceptionActions(ctx, candidate)...)
 		if matched, found := t.ruleRunner.Process(ctx, candidate.rules, candidate.data); found {
 			actions = append(actions, actionForMatch(candidate.span, matched))
 		}
 	}
-	return actions
+	return actions, ctx.Err() == nil
 }
 
-func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules []Rule, content []byte) []contextualAction {
+func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules []Rule, content []byte) ([]contextualAction, bool) {
 	tokens := collectTokens(content)
-	candidates := buildContextualCandidates(content, tokens, rules)
+	candidates := buildContextualCandidates(ctx, content, tokens, rules)
 
 	var actions []contextualAction
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	complete := true
 
 	submit := func(span Token, data []byte, selectedRules []Rule) bool {
 		wg.Add(1)
@@ -316,20 +354,15 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 			if ctx.Err() != nil {
 				return
 			}
-			exceptions := exceptionActions(ctx, contextualCandidate{span: span, data: data, rules: selectedRules})
 			if matched, found := t.ruleRunner.Process(ctx, selectedRules, data); found {
 				mu.Lock()
-				actions = append(actions, exceptions...)
 				actions = append(actions, actionForMatch(span, matched))
-				mu.Unlock()
-			} else if len(exceptions) > 0 {
-				mu.Lock()
-				actions = append(actions, exceptions...)
 				mu.Unlock()
 			}
 		})
 		if err != nil {
 			wg.Done()
+			t.logger.WarnContext(ctx, "Failed to submit contextual anonymization work", "error", err)
 			return false
 		}
 		return true
@@ -337,98 +370,67 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 
 	for _, token := range tokens {
 		if !submit(token, token.Content, rules) {
+			complete = false
 			break
 		}
 	}
-	for _, candidate := range candidates {
-		if !submit(candidate.span, candidate.data, candidate.rules) {
-			break
+	if complete {
+		for _, candidate := range candidates {
+			if !submit(candidate.span, candidate.data, candidate.rules) {
+				complete = false
+				break
+			}
 		}
 	}
 	wg.Wait()
-	return actions
+	return actions, complete && ctx.Err() == nil
 }
 
-//nolint:gocognit // Sweep combines suppression indexing and deterministic overlap resolution.
 func resolveAnonymizationActions(actions []contextualAction) []contextualAction {
-	type suppressionIndex struct {
-		spans   []Token
-		maxEnds []int
-	}
-
-	indexes := make(map[pattern.Entity]*suppressionIndex)
-	for _, action := range actions {
-		if action.suppress {
-			index := indexes[action.entity]
-			if index == nil {
-				index = &suppressionIndex{}
-				indexes[action.entity] = index
-			}
-			index.spans = append(index.spans, action.action.token)
-		}
-	}
-	for _, index := range indexes {
-		slices.SortFunc(index.spans, func(a, b Token) int { return a.Start - b.Start })
-		index.maxEnds = make([]int, len(index.spans))
-		maxEnd := 0
-		for i, span := range index.spans {
-			maxEnd = max(maxEnd, span.End)
-			index.maxEnds[i] = maxEnd
-		}
-	}
-
-	filtered := actions[:0]
-	for _, action := range actions {
-		if action.suppress {
-			continue
-		}
-		suppressed := false
-		if index := indexes[action.entity]; index != nil {
-			position, _ := slices.BinarySearchFunc(index.spans, action.action.token.Start, func(span Token, start int) int {
-				return span.Start - start
-			})
-			for position < len(index.spans) && index.spans[position].Start <= action.action.token.Start {
-				position++
-			}
-			if position > 0 && index.maxEnds[position-1] >= action.action.token.End {
-				suppressed = true
-			}
-		}
-		if !suppressed {
-			filtered = append(filtered, action)
-		}
-	}
-	actions = filtered
-
 	if len(actions) < 2 {
 		return actions
 	}
 
-	slices.SortStableFunc(actions, func(a, b contextualAction) int {
+	slices.SortFunc(actions, func(a, b contextualAction) int {
 		if startDiff := a.action.token.Start - b.action.token.Start; startDiff != 0 {
 			return startDiff
 		}
-		return b.action.token.End - a.action.token.End
+		if endDiff := b.action.token.End - a.action.token.End; endDiff != 0 {
+			return endDiff
+		}
+		if a.entity < b.entity {
+			return -1
+		}
+		if a.entity > b.entity {
+			return 1
+		}
+		return 0
 	})
 
 	resolved := make([]contextualAction, 0, len(actions))
 	best := actions[0]
+	bestLength := best.action.token.Len()
+	groupStart := best.action.token.Start
 	groupEnd := best.action.token.End
 	for _, candidate := range actions[1:] {
 		if candidate.action.token.Start >= groupEnd {
+			best.action.token.Start = groupStart
+			best.action.token.End = groupEnd
 			resolved = append(resolved, best)
 			best = candidate
+			bestLength = candidate.action.token.Len()
+			groupStart = candidate.action.token.Start
 			groupEnd = candidate.action.token.End
 			continue
 		}
-
-		if candidate.action.token.End > groupEnd {
-			groupEnd = candidate.action.token.End
-		}
-		if candidate.action.token.Len() > best.action.token.Len() {
+		groupEnd = max(groupEnd, candidate.action.token.End)
+		if candidate.action.token.Len() > bestLength {
 			best = candidate
+			bestLength = candidate.action.token.Len()
 		}
 	}
+	best.action.token.Start = groupStart
+	best.action.token.End = groupEnd
 	resolved = append(resolved, best)
 	return resolved
 }
