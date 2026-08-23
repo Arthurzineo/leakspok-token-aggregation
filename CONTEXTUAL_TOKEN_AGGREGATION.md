@@ -93,13 +93,18 @@ and leap years, so `29-02-2024` is excluded from PHONE while `31-02-2024` is not
 Ambiguous values such as `05-06-2024` are considered a date when either the BR
 or US interpretation is valid.
 
+ISO date-times using `T`/`t`, such as `2026-08-23T14:30:00`, and times split into
+separate fields, such as `23-08-2026 14 30 45`, are also recognized.
+
 The date check is a bounded byte parser, not a new regular expression or a
-general natural-language date parser. It examines at most the existing 64-byte
-numeric candidate and adds constant work before PHONE matching. Month names,
-two-digit years, time zones, and free-form dates are intentionally outside its
-scope. A real phone deliberately formatted exactly like a valid supported date
-will be excluded; this is the chosen trade-off to avoid common date
-false-positives.
+general natural-language date parser. Numeric candidates remain capped at 64
+bytes. Raw tokens use a constant-time separator precheck and are scanned only
+when date-shaped. Month names, two-digit years, time zones, and free-form dates
+are intentionally outside its scope. A real phone deliberately formatted
+exactly like a valid supported date will be excluded; this is the chosen
+trade-off to avoid common date false-positives. Slash-separated dates are
+already stopped by the tokenizer because `/` is a delimiter; the parser also
+understands `/` when a complete value is supplied internally.
 
 Credit-card candidates are treated differently: a complete 16-digit numeric
 chain is evaluated only by CREDIT_CARD rules and must pass a contextual Luhn
@@ -177,9 +182,30 @@ implementation, avoiding contextual candidate allocation.
   and bounded behavior.
 
 No rule format, exception model, or cache API was replaced. Contextual MASK
-protects the complete formatted span, aggregate exceptions do not cancel an
-independent legacy finding, and cancellation writes no partially analyzed
-output. The change is additive and the public option defaults to `false`.
+protects complete aggregate spans and overlap unions while preserving the
+configured `MaxSize` for ordinary single-token findings. Aggregate exceptions
+do not cancel an independent legacy finding, and cancellation writes no
+partially analyzed output. The change is additive and the public option defaults
+to `false`.
+
+## Accepted limitations
+
+- The legacy PHONE matcher remains permissive, so unrelated numeric groups can
+  still be over-redacted. The feature remains default-off for this reason.
+- A numeric run exceeding a bound is discarded as one ambiguous chain. The
+  scanner does not restart inside that run, so a phone embedded after a long
+  uninterrupted numeric prefix can be missed. This favors avoiding partial or
+  manufactured findings.
+- Cancellation or worker-pool failure fails closed by writing no output, but the
+  current `Anonymize` API has no error return. Callers cannot distinguish that
+  result from an empty output through `AnonymizationDetails` alone.
+- Contextual mode materializes all tokenizer tokens to preserve original spans
+  and resolve overlaps. This uses more memory than the streaming legacy path.
+- The feature is configured through `MakeByteAnalyzer`/`MakeStringAnalyzer`;
+  the lower-level `NewByteAnalyzer` constructor does not expose the option.
+- Contextual cards require Luhn while the legacy single-token card matcher keeps
+  its historical compatibility behavior, so invalid-Luhn input can differ by
+  formatting.
 
 ## Verification
 

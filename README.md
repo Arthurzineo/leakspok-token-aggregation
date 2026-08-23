@@ -169,6 +169,11 @@ Valid BR (`DD-MM-YYYY`), US (`MM-DD-YYYY`), and ISO (`YYYY-MM-DD`) dates are
 excluded from contextual PHONE matching. The bounded parser accepts common
 `-`, `.`, and `/` separators, validates leap years and calendar days, and
 supports optional 24-hour time components without adding a regular expression.
+ISO `T` date-times and space-separated time fields are supported as well.
+
+Aggregate MASK findings protect the complete formatted span and any final
+overlap union. Single-token findings continue to honor the rule's original
+`MaskSettings.MaxSize`.
 
 ### Custom Rules
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/Prosus-Cyber-Xchange/leakspok/analyzer"
@@ -138,9 +139,12 @@ func TestContextualDetectionExcludesKnownDatesFromPhone(t *testing.T) {
 		{"United States dash", "event 12-31-2024 15"},
 		{"United States slash", "event 12/31/2024 15"},
 		{"ISO date", "event 2024-12-31 15"},
+		{"ISO datetime T", "event 2024-12-31T15:30:45"},
 		{"hour and minute", "evento 31-12-2024 15:30"},
 		{"compact hour and minute", "evento 31-12-2024 1530"},
+		{"space separated hour and minute", "evento 31-12-2024 15 30"},
 		{"hour minute and second", "evento 31-12-2024 15:30:45"},
+		{"space separated hour minute and second", "evento 31-12-2024 15 30 45"},
 	}
 
 	for _, tt := range tests {
@@ -233,6 +237,29 @@ func TestContextualDetectionDoesNotRedactNumericPrefixBeyondBounds(t *testing.T)
 	assert.False(t, details.HasFindings)
 }
 
+func TestContextualDetectionDoesNotRedactPrefixBeforePlusContinuation(t *testing.T) {
+	t.Parallel()
+
+	input := "555 1234 +5"
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+	}, input)
+	assert.Equal(t, input, output)
+	assert.False(t, details.HasFindings)
+}
+
+func TestContextualDetectionRestartsAtPlusAfterNumericPrefix(t *testing.T) {
+	t.Parallel()
+
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+	}, "999 +55 11 98765 4321")
+	assert.Equal(t, "999 <PHONE>", output)
+	assert.True(t, details.HasFindings)
+}
+
 func TestContextualDetectionRejectsInvalidCardChecksum(t *testing.T) {
 	t.Parallel()
 
@@ -289,6 +316,27 @@ func TestContextualDetectionPreservesMaskSemanticsOnOriginalRange(t *testing.T) 
 	ba := makeContextualAnalyzer(t, false)
 	output, _ := anonymizeContextual(t, ba, []analyzer.Rule{contextualRule(pattern.EntityPhone, analyzer.MASK)}, "+55 54 99912 0654")
 	assert.Equal(t, "*****************", output)
+}
+
+func TestContextualDetectionPreservesLegacyMaskSizeForSingleToken(t *testing.T) {
+	t.Parallel()
+
+	ba := makeContextualAnalyzer(t, false)
+	output, _ := anonymizeContextual(t, ba, []analyzer.Rule{contextualRule(pattern.EntityPhone, analyzer.MASK)}, "+5554999120654")
+	assert.Equal(t, "***54999120654", output)
+}
+
+func TestContextualDetectionMasksCompleteOverlapUnion(t *testing.T) {
+	t.Parallel()
+
+	input := "55 123.456 @ mail.com"
+	ba := makeContextualAnalyzer(t, false)
+	output, details := anonymizeContextual(t, ba, []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.MASK),
+		contextualRule(pattern.EntityEmail, analyzer.MASK),
+	}, input)
+	assert.Equal(t, strings.Repeat("*", len(input)), output)
+	assert.True(t, details.HasFindings)
 }
 
 func TestContextualDetectionSupportsUnicodeHorizontalSpaces(t *testing.T) {
@@ -396,6 +444,35 @@ func TestContextualDetectionSerialAndConcurrentParity(t *testing.T) {
 	assert.Equal(t, serialDetails.HasFindings, concurrentDetails.HasFindings)
 	assert.ElementsMatch(t, serialDetails.DetectedEntities, concurrentDetails.DetectedEntities)
 	assert.ElementsMatch(t, serialDetails.AnonymizedEntities, concurrentDetails.AnonymizedEntities)
+}
+
+func TestContextualDetectionRuleConcurrencyPreservesEntityPriority(t *testing.T) {
+	t.Parallel()
+
+	ba, err := analyzer.MakeByteAnalyzer(
+		context.Background(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		analyzer.RunnerOptions{
+			ContextualDetection: analyzer.ContextualDetectionOptions{Enabled: true},
+			Concurrency: analyzer.ConcurrencyOptions{
+				Enabled:                  true,
+				ConcurrentRuleProcessing: true,
+				RuleRunnerPoolSize:       4,
+			},
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(ba.Stop)
+
+	rules := []analyzer.Rule{
+		contextualRule(pattern.EntityPhone, analyzer.REDACT),
+		contextualRule(pattern.EntityCPF, analyzer.REDACT),
+	}
+	for range 50 {
+		output, details := anonymizeContextual(t, ba, rules, "529 982 247 25")
+		assert.Equal(t, "<CPF_NUMBER>", output)
+		assert.Contains(t, details.AnonymizedEntities, pattern.EntityCPF)
+	}
 }
 
 func BenchmarkByteAnalyzerContextual(b *testing.B) {

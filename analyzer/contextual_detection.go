@@ -163,7 +163,7 @@ func parseKnownDate(value []byte) bool {
 	return validCalendarDate(year, second, first) || validCalendarDate(year, first, second)
 }
 
-func parseKnownTime(value []byte) bool {
+func parseCompactTime(value []byte) bool {
 	switch len(value) {
 	case 2:
 		hour, ok := parseTwoDigits(value)
@@ -185,6 +185,24 @@ func parseKnownTime(value []byte) bool {
 	default:
 		return false
 	}
+}
+
+func parseKnownTime(value []byte) bool {
+	first, remainder := splitHorizontalFields(value)
+	if len(remainder) == 0 {
+		return parseCompactTime(first)
+	}
+	second, third := splitHorizontalFields(remainder)
+	hour, hourOK := parseTwoDigits(first)
+	minute, minuteOK := parseTwoDigits(second)
+	if !hourOK || !minuteOK || hour >= 24 || minute >= 60 {
+		return false
+	}
+	if len(third) == 0 {
+		return true
+	}
+	secondValue, secondOK := parseTwoDigits(third)
+	return secondOK && secondValue < 60
 }
 
 func splitHorizontalFields(value []byte) ([]byte, []byte) {
@@ -211,6 +229,10 @@ func looksLikeKnownDateTime(value []byte) bool {
 		return false
 	}
 	date, timeValue := splitHorizontalFields(value)
+	if len(date) > 10 && (date[10] == 'T' || date[10] == 't') {
+		timeValue = date[11:]
+		date = date[:10]
+	}
 	if !parseKnownDate(date) {
 		return false
 	}
@@ -255,6 +277,11 @@ func isNumericCandidateToken(token []byte) bool {
 	return ok
 }
 
+func isNumericContinuationToken(token []byte) bool {
+	_, _, ok := appendNumericToken(nil, token, false)
+	return ok
+}
+
 func scanNumericChain(input []byte, tokens []Token, start int) (int, []byte, int, bool, bool) {
 	canonical, digits, ok := appendNumericToken(
 		make([]byte, 0, maxNumericCandidateBytes),
@@ -267,8 +294,13 @@ func scanNumericChain(input []byte, tokens []Token, start int) (int, []byte, int
 
 	end := start
 	for next := start + 1; next < len(tokens); next++ {
-		if !isHorizontalGap(input[tokens[next-1].End:tokens[next].Start], true) ||
-			!isNumericCandidateToken(tokens[next].Content) {
+		if !isHorizontalGap(input[tokens[next-1].End:tokens[next].Start], true) {
+			break
+		}
+		if !isNumericContinuationToken(tokens[next].Content) {
+			if isNumericCandidateToken(tokens[next].Content) {
+				return end, canonical, digits, true, true
+			}
 			break
 		}
 		if next-start+1 > maxNumericCandidateTokens {
@@ -278,7 +310,7 @@ func scanNumericChain(input []byte, tokens []Token, start int) (int, []byte, int
 		var added int
 		canonical, added, ok = appendNumericToken(canonical, tokens[next].Content, false)
 		if !ok {
-			break
+			return end, canonical, digits, true, true
 		}
 		digits += added
 		if digits > maxNumericCandidateDigits || len(canonical) > maxNumericCandidateBytes {
@@ -294,7 +326,8 @@ func buildNumericCandidates(ctx context.Context, input []byte, tokens []Token, r
 	for start := range tokens {
 		if start > 0 &&
 			isHorizontalGap(input[tokens[start-1].End:tokens[start].Start], true) &&
-			isNumericCandidateToken(tokens[start-1].Content) {
+			isNumericCandidateToken(tokens[start-1].Content) &&
+			isNumericContinuationToken(tokens[start].Content) {
 			continue
 		}
 
@@ -429,9 +462,9 @@ func buildEmailCandidates(input []byte, tokens []Token, rules []Rule) []contextu
 	return candidates
 }
 
-func actionForMatch(span Token, matched Rule) contextualAction {
+func actionForMatch(span Token, matched Rule, aggregate bool) contextualAction {
 	settings := matched.Settings
-	if settings.Strategy == MASK && settings.Mask != nil {
+	if aggregate && settings.Strategy == MASK && settings.Mask != nil {
 		mask := *settings.Mask
 		mask.MaxSize = span.Len()
 		settings.Mask = &mask
@@ -440,6 +473,21 @@ func actionForMatch(span Token, matched Rule) contextualAction {
 		action: anonymizationAction{token: span, settings: settings},
 		entity: matched.Matcher.Entity(),
 	}
+}
+
+func (t *ByteAnalyzer) processContextualCandidate(ctx context.Context, candidate contextualCandidate) (Rule, bool) {
+	for start := 0; start < len(candidate.rules); {
+		entity := candidate.rules[start].Matcher.Entity()
+		end := start + 1
+		for end < len(candidate.rules) && candidate.rules[end].Matcher.Entity() == entity {
+			end++
+		}
+		if matched, found := t.ruleRunner.Process(ctx, candidate.rules[start:end], candidate.data); found {
+			return matched, true
+		}
+		start = end
+	}
+	return Rule{}, false
 }
 
 func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules []Rule, content []byte) ([]contextualAction, bool) {
@@ -451,7 +499,7 @@ func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules 
 		}
 		tokenRules := excludePhoneForKnownDate(rules, token.Content)
 		if matched, found := t.ruleRunner.Process(ctx, tokenRules, token.Content); found {
-			actions = append(actions, actionForMatch(token, matched))
+			actions = append(actions, actionForMatch(token, matched, false))
 		}
 	}
 
@@ -459,8 +507,8 @@ func (t *ByteAnalyzer) anonymizeSequentialContextual(ctx context.Context, rules 
 		if ctx.Err() != nil {
 			return nil, false
 		}
-		if matched, found := t.ruleRunner.Process(ctx, candidate.rules, candidate.data); found {
-			actions = append(actions, actionForMatch(candidate.span, matched))
+		if matched, found := t.processContextualCandidate(ctx, candidate); found {
+			actions = append(actions, actionForMatch(candidate.span, matched, true))
 		}
 	}
 	return actions, ctx.Err() == nil
@@ -475,16 +523,24 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 	var wg sync.WaitGroup
 	complete := true
 
-	submit := func(span Token, data []byte, selectedRules []Rule) bool {
+	submit := func(span Token, data []byte, selectedRules []Rule, aggregate bool) bool {
 		wg.Add(1)
 		err := t.pool.Submit(func() {
 			defer wg.Done()
 			if ctx.Err() != nil {
 				return
 			}
-			if matched, found := t.ruleRunner.Process(ctx, selectedRules, data); found {
+			candidate := contextualCandidate{span: span, data: data, rules: selectedRules}
+			var matched Rule
+			var found bool
+			if aggregate {
+				matched, found = t.processContextualCandidate(ctx, candidate)
+			} else {
+				matched, found = t.ruleRunner.Process(ctx, selectedRules, data)
+			}
+			if found {
 				mu.Lock()
-				actions = append(actions, actionForMatch(span, matched))
+				actions = append(actions, actionForMatch(span, matched, aggregate))
 				mu.Unlock()
 			}
 		})
@@ -498,14 +554,14 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 
 	for _, token := range tokens {
 		tokenRules := excludePhoneForKnownDate(rules, token.Content)
-		if !submit(token, token.Content, tokenRules) {
+		if !submit(token, token.Content, tokenRules, false) {
 			complete = false
 			break
 		}
 	}
 	if complete {
 		for _, candidate := range candidates {
-			if !submit(candidate.span, candidate.data, candidate.rules) {
+			if !submit(candidate.span, candidate.data, candidate.rules, true) {
 				complete = false
 				break
 			}
@@ -513,6 +569,18 @@ func (t *ByteAnalyzer) anonymizeConcurrentContextual(ctx context.Context, rules 
 	}
 	wg.Wait()
 	return actions, complete && ctx.Err() == nil
+}
+
+func actionForResolvedSpan(action contextualAction, start, end int) contextualAction {
+	widened := action.action.token.Start != start || action.action.token.End != end
+	action.action.token.Start = start
+	action.action.token.End = end
+	if widened && action.action.settings.Strategy == MASK && action.action.settings.Mask != nil {
+		mask := *action.action.settings.Mask
+		mask.MaxSize = end - start
+		action.action.settings.Mask = &mask
+	}
+	return action
 }
 
 func resolveAnonymizationActions(actions []contextualAction) []contextualAction {
@@ -543,9 +611,7 @@ func resolveAnonymizationActions(actions []contextualAction) []contextualAction 
 	groupEnd := best.action.token.End
 	for _, candidate := range actions[1:] {
 		if candidate.action.token.Start >= groupEnd {
-			best.action.token.Start = groupStart
-			best.action.token.End = groupEnd
-			resolved = append(resolved, best)
+			resolved = append(resolved, actionForResolvedSpan(best, groupStart, groupEnd))
 			best = candidate
 			bestLength = candidate.action.token.Len()
 			groupStart = candidate.action.token.Start
@@ -558,8 +624,6 @@ func resolveAnonymizationActions(actions []contextualAction) []contextualAction 
 			bestLength = candidate.action.token.Len()
 		}
 	}
-	best.action.token.Start = groupStart
-	best.action.token.End = groupEnd
-	resolved = append(resolved, best)
+	resolved = append(resolved, actionForResolvedSpan(best, groupStart, groupEnd))
 	return resolved
 }

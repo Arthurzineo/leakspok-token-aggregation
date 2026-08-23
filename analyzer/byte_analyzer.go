@@ -259,10 +259,9 @@ func (t *ByteAnalyzer) anonymizeConcurrent(
 	return actions
 }
 
-// Stop releases the ByteAnalyzer's resources, stopping the rule runner and
-// the goroutine pool if configured. Subsequent calls to Anonymize will
-// process tokens sequentially if the pool has been released.
-// Stop is safe to call concurrently with Anonymize.
+// Stop releases the ByteAnalyzer's rule runner and goroutine pool resources.
+// The analyzer must not be used after Stop returns. Stop is safe to call
+// concurrently with Anonymize.
 func (t *ByteAnalyzer) Stop() {
 	if t.ruleRunner != nil {
 		t.ruleRunner.Stop()
