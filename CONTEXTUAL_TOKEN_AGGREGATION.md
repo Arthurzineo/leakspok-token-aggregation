@@ -114,6 +114,16 @@ chain is evaluated only by CREDIT_CARD rules and must pass a contextual Luhn
 check. It is not offered to PHONE or CPF rules. The legacy single-token card
 matcher keeps its prior compatibility behavior.
 
+The contextual Luhn implementation is intentional and correct: separators are
+removed, exactly 16 digits are required, the existing supported-card prefix
+check still applies, and the checksum must be valid. A failed complete card
+candidate is not partially offered to PHONE or CPF. The only behavioral
+difference is that the historical single-token matcher is preserved unchanged
+and may accept input without the same Luhn requirement. This compatibility
+choice avoids silently breaking existing callers; making both paths uniform
+would require a separately reviewed breaking behavior change to the legacy
+matcher.
+
 ## Usage
 
 ```go
@@ -228,7 +238,8 @@ SLA.
   the lower-level `NewByteAnalyzer` constructor does not expose the option.
 - Contextual cards require Luhn while the legacy single-token card matcher keeps
   its historical compatibility behavior, so invalid-Luhn input can differ by
-  formatting.
+  formatting. This is a documented compatibility limitation, not an error in
+  the contextual checksum implementation.
 
 ## Verification
 
