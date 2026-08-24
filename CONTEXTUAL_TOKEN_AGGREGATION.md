@@ -242,6 +242,16 @@ were manually reviewed.
 - Spaced dates such as `27 12 2017` and horizontally fragmented order numbers
   can still be accepted by the permissive PHONE matcher. The preliminary corpus
   evaluation observed both cases.
+- Date exclusion is therefore incomplete: the statement that BR, US, and ISO
+  dates are excluded applies to the documented separator-based forms, not to
+  every space-separated representation. Supporting `27 12 2017` safely remains
+  follow-up work because accepting arbitrary numeric fields can also join
+  unrelated values.
+- The service-wide contextual-path activation rate is unknown. A training
+  dataset is not required for this measurement, but representative production
+  prompts or an equivalent traffic corpus are. Without that distribution, the
+  local per-operation benchmarks cannot be converted into a reliable total CPU
+  or latency estimate for a real deployment.
 - A numeric run exceeding a bound is discarded as one ambiguous chain. The
   scanner does not restart inside that run, so a phone embedded after a long
   uninterrupted numeric prefix can be missed. This favors avoiding partial or
