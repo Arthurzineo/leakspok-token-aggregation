@@ -191,6 +191,21 @@ do not cancel an independent legacy finding, and cancellation writes no
 partially analyzed output. The change is additive and the public option defaults
 to `false`.
 
+## Measured performance
+
+Local three-run benchmark medians showed approximately 0% to 2.3% extra time
+for marker-free text, with identical allocation counts. Such input takes the
+legacy path after a bounded marker scan. Inputs that actually entered contextual
+processing took 44.5% to 55.9% more time (51.7% simple mean), while each tested
+short operation remained below 8 microseconds.
+
+CPU utilization was not measured with a CPU profiler. Because these benchmarks
+are in-memory and CPU-bound, 44.5% to 55.9% is a useful estimate for additional
+CPU *per contextual operation*, not for the whole service. The service-wide
+effect is diluted by the share of requests that enter this path and must be
+confirmed under representative production load. These measurements are not an
+SLA.
+
 ## Accepted limitations
 
 - The legacy PHONE matcher remains permissive, so unrelated numeric groups can
