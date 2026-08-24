@@ -67,7 +67,8 @@ Examples that stop or are rejected:
 - `55 code 54 code 99912`: words between numeric fragments stop the numeric
   scanner.
 - Numeric input beyond 16 digits, 17 tokens, or 64 bytes: the complete chain is
-  rejected and no shorter prefix is emitted as a finding.
+  rejected and no shorter contextual prefix is emitted. Independent matches
+  from the legacy per-token path may still remain.
 - `test @ unrelated words example . com`: the email grammar does not skip words
   to manufacture an address.
 - Longer email-like input: the scanner never extends a candidate beyond 5
@@ -180,8 +181,9 @@ implementation, avoiding contextual candidate allocation.
 - `analyzer/contextual_detection_test.go`: table-driven functional tests,
   serial/concurrent parity tests, boundary and overlap cases, default-off
   compatibility checks, and performance benchmarks.
-- `analyzer/corpus_probe_test.go`: opt-in legacy/contextual comparison over a
-  gzip-compressed Carolina Corpus XML file supplied by the evaluator.
+- `analyzer/corpus_probe_test.go`: experimental opt-in legacy/contextual corpus
+  comparison harness. Its XML extraction and representativeness have not been
+  validated for production conclusions.
 - `CONTEXTUAL_TOKEN_AGGREGATION.md`: design rationale, operational guidance,
   architecture, file inventory, limits, and verification instructions.
 
@@ -211,37 +213,17 @@ legacy path after a bounded marker scan. Inputs that actually entered contextual
 processing took 44.5% to 55.9% more time (51.7% simple mean), while each tested
 short operation remained below 8 microseconds.
 
-CPU utilization was not measured with a CPU profiler. Because these benchmarks
-are in-memory and CPU-bound, 44.5% to 55.9% is a useful estimate for additional
-CPU *per contextual operation*, not for the whole service. The service-wide
-effect is diluted by the share of requests that enter this path and must be
-confirmed under representative production load. These measurements are not an
-SLA.
-
-## Preliminary PT-BR corpus evaluation
-
-An opt-in comparison is available in `analyzer/corpus_probe_test.go`. It accepts
-a gzip-compressed Carolina Corpus XML file through `CAROLINA_CORPUS_GZ` and
-compares the legacy and contextual paths over the same documents. The evaluated
-Carolina 2.0.1 `DATc.xml.gz` file had SHA-256
-`7d832d977530356243a53b67614aeef91fe46bedb0bc6515cef2382cc8812c50`.
-
-Across 10,808 documents (1,097,485 extracted text bytes), the contextual path
-added five PHONE findings in four documents. Manual review found four false
-positives—two spaced dates and two order identifiers—and one public commercial
-service number, which is a syntactically valid phone but not evidence of improved
-PII recall. No additional PII was confirmed, and no additional CPF, credit-card,
-or email findings occurred in this small sample. This is preliminary evidence,
-not a statistically representative precision estimate; only the five deltas
-were manually reviewed.
+CPU utilization was not measured with a CPU profiler, so no CPU percentage is
+claimed. Service-wide latency and CPU impact require representative production
+traffic and a dedicated load profile. These local timing measurements are not
+an SLA.
 
 ## Accepted limitations
 
 - The legacy PHONE matcher remains permissive, so unrelated numeric groups can
   still be over-redacted. The feature remains default-off for this reason.
-- Spaced dates such as `27 12 2017` and horizontally fragmented order numbers
-  can still be accepted by the permissive PHONE matcher. The preliminary corpus
-  evaluation observed both cases.
+- Spaced dates such as `27 12 2017` can still be accepted by the permissive
+  PHONE matcher.
 - Date exclusion is therefore incomplete: the statement that BR, US, and ISO
   dates are excluded applies to the documented separator-based forms, not to
   every space-separated representation. Supporting `27 12 2017` safely remains
@@ -272,6 +254,9 @@ production-readiness claim:
 - Worst-case measurements of elapsed time, memory, allocations, and goroutine
   count.
 - Cancellation tests while adversarial inputs are being processed.
+
+### Additional accepted limitations
+
 - A numeric run exceeding a bound is discarded as one ambiguous chain. The
   scanner does not restart inside that run, so a phone embedded after a long
   uninterrupted numeric prefix can be missed. This favors avoiding partial or
