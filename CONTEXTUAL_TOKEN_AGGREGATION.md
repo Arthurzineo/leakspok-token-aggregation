@@ -252,6 +252,26 @@ were manually reviewed.
   prompts or an equivalent traffic corpus are. Without that distribution, the
   local per-operation benchmarks cannot be converted into a reliable total CPU
   or latency estimate for a real deployment.
+- Candidate-level token, byte, and digit bounds already limit each aggregation
+  attempt, but there is no dedicated whole-input policy for adversarial payloads
+  such as `"1 "` repeated tens or hundreds of thousands of times. Adding and
+  calibrating such a global policy is future implementation work; the current
+  bounds must not be presented as a measured worst-case request guarantee.
+
+### Pending robustness verification
+
+The following tests have not yet been implemented and remain required before a
+production-readiness claim:
+
+- Native fuzzing with contextual detection disabled, proving byte-for-byte and
+  metadata equivalence with the legacy path.
+- Native fuzzing with contextual detection enabled, checking preservation of
+  legacy findings except for explicitly documented suppressions.
+- Adversarial input containing `"1 "` repeated tens or hundreds of thousands of
+  times.
+- Worst-case measurements of elapsed time, memory, allocations, and goroutine
+  count.
+- Cancellation tests while adversarial inputs are being processed.
 - A numeric run exceeding a bound is discarded as one ambiguous chain. The
   scanner does not restart inside that run, so a phone embedded after a long
   uninterrupted numeric prefix can be missed. This favors avoiding partial or
