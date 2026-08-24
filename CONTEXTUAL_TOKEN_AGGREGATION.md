@@ -227,12 +227,13 @@ Carolina 2.0.1 `DATc.xml.gz` file had SHA-256
 `7d832d977530356243a53b67614aeef91fe46bedb0bc6515cef2382cc8812c50`.
 
 Across 10,808 documents (1,097,485 extracted text bytes), the contextual path
-added five PHONE findings in four documents. Manual review classified one as a
-real service phone (`4003 1000`) and four as false positives: two spaced dates
-and two order identifiers. No additional CPF, credit-card, or email findings
-occurred in this small sample. This is preliminary evidence, not a statistically
-representative precision estimate; the source corpus may also contain genuine
-PII and only the five deltas were manually reviewed.
+added five PHONE findings in four documents. Manual review found four false
+positives—two spaced dates and two order identifiers—and one public commercial
+service number, which is a syntactically valid phone but not evidence of improved
+PII recall. No additional PII was confirmed, and no additional CPF, credit-card,
+or email findings occurred in this small sample. This is preliminary evidence,
+not a statistically representative precision estimate; only the five deltas
+were manually reviewed.
 
 ## Accepted limitations
 
