@@ -180,6 +180,8 @@ implementation, avoiding contextual candidate allocation.
 - `analyzer/contextual_detection_test.go`: table-driven functional tests,
   serial/concurrent parity tests, boundary and overlap cases, default-off
   compatibility checks, and performance benchmarks.
+- `analyzer/corpus_probe_test.go`: opt-in legacy/contextual comparison over a
+  gzip-compressed Carolina Corpus XML file supplied by the evaluator.
 - `CONTEXTUAL_TOKEN_AGGREGATION.md`: design rationale, operational guidance,
   architecture, file inventory, limits, and verification instructions.
 
@@ -216,10 +218,29 @@ effect is diluted by the share of requests that enter this path and must be
 confirmed under representative production load. These measurements are not an
 SLA.
 
+## Preliminary PT-BR corpus evaluation
+
+An opt-in comparison is available in `analyzer/corpus_probe_test.go`. It accepts
+a gzip-compressed Carolina Corpus XML file through `CAROLINA_CORPUS_GZ` and
+compares the legacy and contextual paths over the same documents. The evaluated
+Carolina 2.0.1 `DATc.xml.gz` file had SHA-256
+`7d832d977530356243a53b67614aeef91fe46bedb0bc6515cef2382cc8812c50`.
+
+Across 10,808 documents (1,097,485 extracted text bytes), the contextual path
+added five PHONE findings in four documents. Manual review classified one as a
+real service phone (`4003 1000`) and four as false positives: two spaced dates
+and two order identifiers. No additional CPF, credit-card, or email findings
+occurred in this small sample. This is preliminary evidence, not a statistically
+representative precision estimate; the source corpus may also contain genuine
+PII and only the five deltas were manually reviewed.
+
 ## Accepted limitations
 
 - The legacy PHONE matcher remains permissive, so unrelated numeric groups can
   still be over-redacted. The feature remains default-off for this reason.
+- Spaced dates such as `27 12 2017` and horizontally fragmented order numbers
+  can still be accepted by the permissive PHONE matcher. The preliminary corpus
+  evaluation observed both cases.
 - A numeric run exceeding a bound is discarded as one ambiguous chain. The
   scanner does not restart inside that run, so a phone embedded after a long
   uninterrupted numeric prefix can be missed. This favors avoiding partial or
